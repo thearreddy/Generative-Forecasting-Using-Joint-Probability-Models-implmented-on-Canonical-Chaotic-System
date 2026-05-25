@@ -9,18 +9,12 @@ import torch
 import torch.nn as nn
 
 
-# ============================================================
-# 1. Basic settings
-# ============================================================
+DATASET_PATH = Path("/home/arreddy/generative_forecasting/data/ks_dataset_imex.npy")
+CHECKPOINT_PATH = Path("/home/arreddy/generative_forecasting/conditional_nade.py")
 
 TEST_INDEX = int(1e6)
 FORECAST_HORIZON = int(1e5)
-
-# For every forecast step, the model samples this many possible futures.
-# Increase this for better matching. Decrease this if the code is too slow.
 N_CANDIDATES = 5000
-
-# Candidates are sampled in batches to avoid memory problems.
 CANDIDATE_BATCH_SIZE = 2000
 
 HISTORY_LEN = 2
@@ -30,7 +24,7 @@ HIDDEN_DIM = 1500
 TRAIN_WINDOWS_FOR_STATS = 1_000_000
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-LOG_FILE = SCRIPT_DIR / "conditional_nade_outputs.txt"
+LOG_FILE = SCRIPT_DIR / "conditional_nade_local_outputs.txt"
 
 
 def write_log(message):
@@ -38,42 +32,15 @@ def write_log(message):
         f.write(str(message) + "\n")
 
 
-def find_file(possible_paths, file_description):
-    for path in possible_paths:
-        if path.exists():
-            return path
-    raise FileNotFoundError(f"Could not find {file_description}.")
-
-
-# ============================================================
-# 2. Load dataset
-# ============================================================
-
-
 def load_dataset():
-    dataset_path = find_file(
-        [
-            Path("/kaggle/input/datasets/theredatom/ks-1d-pde/ks_dataset_imex.npy"),
-            Path(r"C:\Users\arred\Documents\MTP\ks_dataset_imex.npy"),
-            Path(r"C:\Users\arred\Documents\MTP\KS_Dataset_IMEX.npy"),
-            SCRIPT_DIR / "ks_dataset_imex.npy",
-            SCRIPT_DIR.parent / "ks_dataset_imex.npy",
-        ],
-        "ks_dataset_imex.npy",
-    )
+    if not DATASET_PATH.exists():
+        raise FileNotFoundError(f"Dataset not found: {DATASET_PATH}")
 
-    dataset = np.load(dataset_path, mmap_mode="r")
-
-    write_log(f"Loaded dataset from: {dataset_path}")
+    dataset = np.load(DATASET_PATH, mmap_mode="r")
+    write_log(f"Loaded dataset from: {DATASET_PATH}")
     write_log(f"Dataset shape: {dataset.shape}")
     write_log(f"Dataset dtype: {dataset.dtype}")
-
     return dataset
-
-
-# ============================================================
-# 3. Dataset statistics used for normalization
-# ============================================================
 
 
 def calculate_normalization_stats(dataset):
@@ -92,19 +59,12 @@ def calculate_normalization_stats(dataset):
     std_window = np.tile(std_state, HISTORY_LEN).astype(np.float32)
 
     write_log(f"Number of time windows used for stats: {num_windows}")
-
     return mean_window, std_window
-
-
-# ============================================================
-# 4. Conditional NADE model
-# ============================================================
 
 
 class ConditionalNADE(nn.Module):
     def __init__(self, target_dim=400, history_dim=400, hidden_dim=1500):
         super().__init__()
-
         self.target_dim = target_dim
         self.history_dim = history_dim
         self.hidden_dim = hidden_dim
@@ -121,15 +81,12 @@ class ConditionalNADE(nn.Module):
 
     def forward(self, x, history):
         batch_size = x.shape[0]
-
         mu_out = torch.zeros(batch_size, self.target_dim, device=x.device)
         log_sigma_out = torch.zeros(batch_size, self.target_dim, device=x.device)
-
         a = self.c.unsqueeze(0).expand(batch_size, -1) + self.U(history)
 
         for i in range(self.target_dim):
             h = torch.relu(a)
-
             mu_i = h @ self.V_mu[i] + self.b_mu[i]
             log_sigma_i = h @ self.V_log_sigma[i] + self.b_log_sigma[i]
             log_sigma_i = torch.clamp(log_sigma_i, min=-5, max=2)
@@ -145,20 +102,17 @@ class ConditionalNADE(nn.Module):
     @torch.no_grad()
     def sample(self, history):
         batch_size = history.shape[0]
-
         samples = torch.zeros(batch_size, self.target_dim, device=history.device)
         a = self.c.unsqueeze(0).expand(batch_size, -1) + self.U(history)
 
         for i in range(self.target_dim):
             h = torch.relu(a)
-
             mu_i = h @ self.V_mu[i] + self.b_mu[i]
             log_sigma_i = h @ self.V_log_sigma[i] + self.b_log_sigma[i]
             log_sigma_i = torch.clamp(log_sigma_i, min=-5, max=2)
 
             sigma_i = torch.exp(log_sigma_i)
             sampled_i = mu_i + sigma_i * torch.randn(batch_size, device=history.device)
-
             samples[:, i] = sampled_i
 
             if i < self.target_dim - 1:
@@ -167,18 +121,11 @@ class ConditionalNADE(nn.Module):
         return samples
 
 
-def load_conditional_nade(device):
-    checkpoint_path = find_file(
-        [
-            Path("/kaggle/input/models/arreddy77/conditional-nade/pytorch/default/1/Conditional_Nade.pt"),
-            SCRIPT_DIR / "Conditional_Nade.pt",
-            SCRIPT_DIR.parent / "Conditional_Nade.pt",
-        ],
-        "Conditional_Nade.pt",
-    )
+def load_model(device):
+    if not CHECKPOINT_PATH.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {CHECKPOINT_PATH}")
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
     model = ConditionalNADE(
         target_dim=TARGET_LEN * STATE_DIM,
         history_dim=HISTORY_LEN * STATE_DIM,
@@ -188,21 +135,14 @@ def load_conditional_nade(device):
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    write_log(f"Loaded model from: {checkpoint_path}")
+    write_log(f"Loaded model from: {CHECKPOINT_PATH}")
     write_log(f"Checkpoint epoch: {checkpoint.get('epoch')}")
     write_log(f"Best loss: {checkpoint.get('best_loss')}")
-
     return model
-
-
-# ============================================================
-# 5. Forecast using conditional candidate matching
-# ============================================================
 
 
 def forecast_trajectory(dataset, mean_window, std_window, model, device):
     initial_history = dataset[TEST_INDEX:TEST_INDEX + HISTORY_LEN].astype(np.float32)
-
     current_history = torch.tensor(
         initial_history.reshape(-1),
         dtype=torch.float32,
@@ -211,7 +151,6 @@ def forecast_trajectory(dataset, mean_window, std_window, model, device):
 
     mean_tensor = torch.tensor(mean_window, dtype=torch.float32, device=device)
     std_tensor = torch.tensor(std_window, dtype=torch.float32, device=device)
-
     forecasted_trajectory = []
 
     with torch.no_grad():
@@ -224,23 +163,22 @@ def forecast_trajectory(dataset, mean_window, std_window, model, device):
 
             while candidates_done < N_CANDIDATES:
                 batch_size = min(CANDIDATE_BATCH_SIZE, N_CANDIDATES - candidates_done)
-
                 batch_history = current_history_norm.unsqueeze(0).expand(batch_size, -1)
+
                 candidates_norm = model.sample(batch_history)
                 candidates = (candidates_norm * std_tensor) + mean_tensor
 
                 candidate_tails = candidates[:, :STATE_DIM]
                 candidate_heads = candidates[:, STATE_DIM:]
-
                 latest_state = current_history[STATE_DIM:]
-                distances = torch.norm(candidate_tails - latest_state, dim=1)
 
-                best_index_in_batch = torch.argmin(distances)
-                best_distance_in_batch = distances[best_index_in_batch]
+                distances = torch.norm(candidate_tails - latest_state, dim=1)
+                best_index = torch.argmin(distances)
+                best_distance_in_batch = distances[best_index]
 
                 if best_distance is None or best_distance_in_batch < best_distance:
                     best_distance = best_distance_in_batch
-                    best_next_state = candidate_heads[best_index_in_batch].clone()
+                    best_next_state = candidate_heads[best_index].clone()
 
                 candidates_done += batch_size
 
@@ -251,19 +189,12 @@ def forecast_trajectory(dataset, mean_window, std_window, model, device):
                 write_log(f"Forecasted {step + 1}/{FORECAST_HORIZON} steps")
 
     forecasted_trajectory = np.asarray(forecasted_trajectory, dtype=np.float32)
-
-    forecast_path = SCRIPT_DIR / "conditional_nade_forecasted_trajectory.npy"
+    forecast_path = SCRIPT_DIR / "conditional_nade_local_forecasted_trajectory.npy"
     np.save(forecast_path, forecasted_trajectory)
 
     write_log(f"Saved forecast: {forecast_path}")
     write_log(f"Forecast shape: {forecasted_trajectory.shape}")
-
     return forecasted_trajectory
-
-
-# ============================================================
-# 6. Distribution adherence plot
-# ============================================================
 
 
 def add_to_histogram(histogram_counts, data_rows, bins):
@@ -292,8 +223,6 @@ def plot_distribution_adherence(dataset, forecasted_trajectory):
     ].astype(np.float32)
     pred_data = forecasted_trajectory[:len(truth_data)]
 
-    train_data_end = TEST_INDEX
-
     all_min = min(dataset.min(), truth_data.min(), pred_data.min())
     all_max = max(dataset.max(), truth_data.max(), pred_data.max())
     bins = np.linspace(all_min, all_max, 80)
@@ -305,13 +234,12 @@ def plot_distribution_adherence(dataset, forecasted_trajectory):
     pred_counts = np.zeros(len(bins) - 1, dtype=np.float64)
 
     chunk_size = 50000
-
     for start in range(0, len(dataset), chunk_size):
         end = min(start + chunk_size, len(dataset))
         add_to_histogram(all_counts, dataset[start:end], bins)
 
-    for start in range(0, train_data_end, chunk_size):
-        end = min(start + chunk_size, train_data_end)
+    for start in range(0, TEST_INDEX, chunk_size):
+        end = min(start + chunk_size, TEST_INDEX)
         add_to_histogram(train_counts, dataset[start:end], bins)
 
     add_to_histogram(truth_counts, truth_data, bins)
@@ -323,13 +251,12 @@ def plot_distribution_adherence(dataset, forecasted_trajectory):
     truth_hist = convert_counts_to_density(truth_counts, bins) + eps
     pred_hist = convert_counts_to_density(pred_counts, bins) + eps
 
-    hist_path = SCRIPT_DIR / "conditional_nade_distribution_histograms.txt"
+    hist_path = SCRIPT_DIR / "conditional_nade_local_distribution_histograms.txt"
     np.savetxt(
         hist_path,
         np.column_stack([centers, all_hist, train_hist, truth_hist, pred_hist]),
         header="center all_density train_density truth_density prediction_density",
     )
-    write_log(f"Saved histogram values: {hist_path}")
 
     left_limit = percentile_from_histogram(train_counts, bins, 5)
     right_limit = percentile_from_histogram(train_counts, bins, 95)
@@ -370,42 +297,26 @@ def plot_distribution_adherence(dataset, forecasted_trajectory):
     ax.set_title("Right Tail View")
 
     plt.tight_layout()
-
-    figure_path = SCRIPT_DIR / "conditional_nade_distribution_adherence.png"
+    figure_path = SCRIPT_DIR / "conditional_nade_local_distribution_adherence.png"
     plt.savefig(figure_path, dpi=300, bbox_inches="tight")
     plt.close()
 
+    write_log(f"Saved histogram values: {hist_path}")
     write_log(f"Saved distribution plot: {figure_path}")
 
 
-# ============================================================
-# 7. Run everything
-# ============================================================
-
-
 def main():
-    LOG_FILE.write_text("Conditional NADE distribution adherence test\n", encoding="utf-8")
-
-    write_log(f"Output folder: {SCRIPT_DIR}")
-    write_log(f"Forecast horizon: {FORECAST_HORIZON}")
-    write_log(f"Candidates per step: {N_CANDIDATES}")
-    write_log(f"Candidate batch size: {CANDIDATE_BATCH_SIZE}")
+    LOG_FILE.write_text("Conditional NADE local distribution adherence test\n", encoding="utf-8")
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     write_log(f"Using device: {device}")
+    write_log(f"Dataset path: {DATASET_PATH}")
+    write_log(f"Checkpoint path: {CHECKPOINT_PATH}")
 
     dataset = load_dataset()
     mean_window, std_window = calculate_normalization_stats(dataset)
-    model = load_conditional_nade(device)
-
-    forecasted_trajectory = forecast_trajectory(
-        dataset,
-        mean_window,
-        std_window,
-        model,
-        device,
-    )
-
+    model = load_model(device)
+    forecasted_trajectory = forecast_trajectory(dataset, mean_window, std_window, model, device)
     plot_distribution_adherence(dataset, forecasted_trajectory)
 
     write_log("Done.")

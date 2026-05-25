@@ -1,0 +1,9 @@
+Conditional NADE notebook outputs
+Notebook output directory: g:\My Drive\02_Academics\01_Academic_Docs\04_IIT_Delhi\09_Assignments\02_Sem\03_DGM\AML7810A_Probablistic_ML_Deep_Generative_Models_Lab\Project\03_Source_Code\KS_Equation\02_Conditional_NADE\Distrivution_Adherence_test
+Loaded dataset from: C:\Users\arred\Documents\MTP\ks_dataset_imex.npy
+(4000000, 200)
+Saved figure: g:\My Drive\02_Academics\01_Academic_Docs\04_IIT_Delhi\09_Assignments\02_Sem\03_DGM\AML7810A_Probablistic_ML_Deep_Generative_Models_Lab\Project\03_Source_Code\KS_Equation\02_Conditional_NADE\Distrivution_Adherence_test\01_ground_truth.png
+Number of time windows (samples) in the Training Dataset = 1000000
+(2, 200)
+Loaded conditional NADE from: g:\My Drive\02_Academics\01_Academic_Docs\04_IIT_Delhi\09_Assignments\02_Sem\03_DGM\AML7810A_Probablistic_ML_Deep_Generative_Models_Lab\Project\03_Source_Code\KS_Equation\02_Conditional_NADE\Conditional_Nade.pt
+Checkpoint epoch: 95 | best loss: -1610.3522
