@@ -1,4 +1,5 @@
 from pathlib import Path
+import gc
 
 import matplotlib
 matplotlib.use("Agg")
@@ -10,12 +11,12 @@ import torch.nn as nn
 
 
 DATASET_PATH = Path("/home/arreddy/generative_forecasting/data/ks_dataset_imex.npy")
-CHECKPOINT_PATH = Path("/home/arreddy/generative_forecasting/conditional_nade.py")
+CHECKPOINT_PATH = Path("/home/arreddy/generative_forecasting/Conditional_Nade.pt")
 
 TEST_INDEX = int(1e6)
 FORECAST_HORIZON = int(1e5)
-N_CANDIDATES = 5000
-CANDIDATE_BATCH_SIZE = 2000
+N_CANDIDATES = int(1e4)
+CANDIDATE_BATCH_SIZE = 5000
 
 HISTORY_LEN = 2
 TARGET_LEN = 2
@@ -28,6 +29,7 @@ LOG_FILE = SCRIPT_DIR / "conditional_nade_local_outputs.txt"
 
 
 def write_log(message):
+    print(message, flush=True)
     with LOG_FILE.open("a", encoding="utf-8") as f:
         f.write(str(message) + "\n")
 
@@ -60,6 +62,26 @@ def calculate_normalization_stats(dataset):
 
     write_log(f"Number of time windows used for stats: {num_windows}")
     return mean_window, std_window
+
+
+def get_effective_forecast_horizon(dataset):
+    available_horizon = len(dataset) - TEST_INDEX - HISTORY_LEN
+    if available_horizon <= 0:
+        raise ValueError(
+            "TEST_INDEX leaves no truth data for comparison. "
+            f"len(dataset)={len(dataset)}, TEST_INDEX={TEST_INDEX}, "
+            f"HISTORY_LEN={HISTORY_LEN}"
+        )
+
+    effective_horizon = min(FORECAST_HORIZON, available_horizon)
+    if effective_horizon < FORECAST_HORIZON:
+        write_log(
+            "Requested forecast horizon exceeds available truth data. "
+            f"Using {effective_horizon} instead of {FORECAST_HORIZON}."
+        )
+
+    write_log(f"Effective forecast horizon: {effective_horizon}")
+    return effective_horizon
 
 
 class ConditionalNADE(nn.Module):
@@ -125,7 +147,7 @@ def load_model(device):
     if not CHECKPOINT_PATH.exists():
         raise FileNotFoundError(f"Checkpoint not found: {CHECKPOINT_PATH}")
 
-    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device, weights_only = True)
     model = ConditionalNADE(
         target_dim=TARGET_LEN * STATE_DIM,
         history_dim=HISTORY_LEN * STATE_DIM,
@@ -141,8 +163,14 @@ def load_model(device):
     return model
 
 
-def forecast_trajectory(dataset, mean_window, std_window, model, device):
+def forecast_trajectory(dataset, mean_window, std_window, model, device, forecast_horizon):
     initial_history = dataset[TEST_INDEX:TEST_INDEX + HISTORY_LEN].astype(np.float32)
+    if len(initial_history) != HISTORY_LEN:
+        raise ValueError(
+            "Initial history is incomplete. "
+            f"Got {len(initial_history)} rows, expected {HISTORY_LEN}."
+        )
+
     current_history = torch.tensor(
         initial_history.reshape(-1),
         dtype=torch.float32,
@@ -154,7 +182,7 @@ def forecast_trajectory(dataset, mean_window, std_window, model, device):
     forecasted_trajectory = []
 
     with torch.no_grad():
-        for step in range(FORECAST_HORIZON):
+        for step in range(forecast_horizon):
             current_history_norm = (current_history - mean_tensor) / (std_tensor + 1e-8)
 
             best_distance = None
@@ -186,13 +214,9 @@ def forecast_trajectory(dataset, mean_window, std_window, model, device):
             current_history = torch.cat([current_history[STATE_DIM:], best_next_state])
 
             if (step + 1) % 100 == 0:
-                write_log(f"Forecasted {step + 1}/{FORECAST_HORIZON} steps")
+                write_log(f"Forecasted {step + 1}/{forecast_horizon} steps")
 
     forecasted_trajectory = np.asarray(forecasted_trajectory, dtype=np.float32)
-    forecast_path = SCRIPT_DIR / "conditional_nade_local_forecasted_trajectory.npy"
-    np.save(forecast_path, forecasted_trajectory)
-
-    write_log(f"Saved forecast: {forecast_path}")
     write_log(f"Forecast shape: {forecasted_trajectory.shape}")
     return forecasted_trajectory
 
@@ -206,6 +230,8 @@ def add_to_histogram(histogram_counts, data_rows, bins):
 def convert_counts_to_density(counts, bins):
     bin_widths = np.diff(bins)
     total_count = counts.sum()
+    if total_count == 0:
+        raise ValueError("Cannot convert empty histogram counts to density.")
     return counts / (total_count * bin_widths)
 
 
@@ -217,11 +243,20 @@ def percentile_from_histogram(counts, bins, percentile):
     return bins[bin_index]
 
 
-def plot_distribution_adherence(dataset, forecasted_trajectory):
+def plot_distribution_adherence(dataset, forecasted_trajectory, forecast_horizon):
     truth_data = dataset[
-        TEST_INDEX + HISTORY_LEN:TEST_INDEX + HISTORY_LEN + FORECAST_HORIZON
+        TEST_INDEX + HISTORY_LEN:TEST_INDEX + HISTORY_LEN + forecast_horizon
     ].astype(np.float32)
     pred_data = forecasted_trajectory[:len(truth_data)]
+
+    write_log(f"Truth data shape for plotting: {truth_data.shape}")
+    write_log(f"Prediction data shape for plotting: {pred_data.shape}")
+
+    if truth_data.size == 0 or pred_data.size == 0:
+        raise ValueError(
+            "No data available for distribution plot. "
+            f"truth_data.size={truth_data.size}, pred_data.size={pred_data.size}"
+        )
 
     all_min = min(dataset.min(), truth_data.min(), pred_data.min())
     all_max = max(dataset.max(), truth_data.max(), pred_data.max())
@@ -238,8 +273,9 @@ def plot_distribution_adherence(dataset, forecasted_trajectory):
         end = min(start + chunk_size, len(dataset))
         add_to_histogram(all_counts, dataset[start:end], bins)
 
-    for start in range(0, TEST_INDEX, chunk_size):
-        end = min(start + chunk_size, TEST_INDEX)
+    train_end = min(TEST_INDEX, len(dataset))
+    for start in range(0, train_end, chunk_size):
+        end = min(start + chunk_size, train_end)
         add_to_histogram(train_counts, dataset[start:end], bins)
 
     add_to_histogram(truth_counts, truth_data, bins)
@@ -305,21 +341,51 @@ def plot_distribution_adherence(dataset, forecasted_trajectory):
     write_log(f"Saved distribution plot: {figure_path}")
 
 
+def clear_gpu_memory():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+        write_log("Cleared CUDA cache.")
+
+
 def main():
     LOG_FILE.write_text("Conditional NADE local distribution adherence test\n", encoding="utf-8")
 
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    write_log(f"Using device: {device}")
-    write_log(f"Dataset path: {DATASET_PATH}")
-    write_log(f"Checkpoint path: {CHECKPOINT_PATH}")
+    dataset = None
+    mean_window = None
+    std_window = None
+    model = None
+    forecasted_trajectory = None
 
-    dataset = load_dataset()
-    mean_window, std_window = calculate_normalization_stats(dataset)
-    model = load_model(device)
-    forecasted_trajectory = forecast_trajectory(dataset, mean_window, std_window, model, device)
-    plot_distribution_adherence(dataset, forecasted_trajectory)
+    try:
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        write_log(f"Using device: {device}")
+        write_log(f"Dataset path: {DATASET_PATH}")
+        write_log(f"Checkpoint path: {CHECKPOINT_PATH}")
 
-    write_log("Done.")
+        dataset = load_dataset()
+        forecast_horizon = get_effective_forecast_horizon(dataset)
+        mean_window, std_window = calculate_normalization_stats(dataset)
+        model = load_model(device)
+        forecasted_trajectory = forecast_trajectory(
+            dataset,
+            mean_window,
+            std_window,
+            model,
+            device,
+            forecast_horizon,
+        )
+        plot_distribution_adherence(dataset, forecasted_trajectory, forecast_horizon)
+
+        write_log("Done.")
+    finally:
+        forecasted_trajectory = None
+        model = None
+        std_window = None
+        mean_window = None
+        dataset = None
+        clear_gpu_memory()
 
 
 if __name__ == "__main__":
