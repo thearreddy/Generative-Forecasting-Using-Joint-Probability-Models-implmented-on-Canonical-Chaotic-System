@@ -180,7 +180,7 @@ for traj_idx, idx in enumerate(test_start_indices):
         current_history = torch.cat([current_history[200:], winning_forecast])
     
     if (traj_idx + 1) % 50 == 0:
-        print(f"Processed {traj_idx + 1}/{num_test}")
+        write_log(f"Processed {traj_idx + 1}/{num_test}")
 all_preds = all_preds_t.cpu().numpy()
 all_ground_truth = all_ground_truth_t.cpu().numpy()
 
